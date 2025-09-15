@@ -1,0 +1,64 @@
+[profile.default]
+src = "contracts"
+out = "out"
+libs = ["lib", "node_modules"]
+test = "test"
+script = "script"
+# Suppress warnings
+ignored_error_codes = [2519, 5667, 2072, 2018]
+suppress_warnings = true
+# Disable specific lint warnings
+ignored_warnings_from = ["*"]
+deny_warnings = false
+
+# See more config options https://github.com/foundry-rs/foundry/tree/master/config
+
+remappings = [
+    "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
+    "@openzeppelin/contracts-upgradeable/=node_modules/@openzeppelin/contracts-upgradeable/",
+    "@cryptoalgebra/integral-core/=node_modules/@cryptoalgebra/integral-core/",
+    "@cryptoalgebra/integral-periphery/=node_modules/@cryptoalgebra/integral-periphery/",
+    "@cryptoalgebra/integral-base-plugin/=node_modules/@cryptoalgebra/integral-base-plugin/",
+    "@cryptoalgebra/integral-farming/=node_modules/@cryptoalgebra/integral-farming/",
+]
+
+solc_version = "0.8.13"
+evm_version = "london"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+
+# Gas optimization settings
+ffi = false
+fs_permissions = [
+    { access = "read-write", path = "./" }
+]
+
+[profile.local]
+verbosity = 3
+gas_reports = ["*"]
+
+[profile.test]
+verbosity = 3
+gas_reports = ["*"]
+
+[rpc_endpoints]
+local = "http://localhost:8545"
+anvil = "http://localhost:8545"
+hyper_test="${HYPER_TEST}"
+hyper = "${HYPEREVM_RPC_URL}"
+
+[etherscan]
+# Add your API keys here
+
+# Lint configuration
+[profile.default.lint]
+# Disable specific lint rules
+ignored = [
+    "asm-keccak256",           # Inline assembly for keccak256
+    "unaliased-plain-import",   # Plain imports without alias
+    "screaming-snake-case-const", # Constant naming convention
+    "mixed-case-variable",      # Variable naming convention
+    "mixed-case-function",      # Function naming convention
+    "unused-import"             # Unused imports
+]
