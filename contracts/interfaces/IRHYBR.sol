@@ -51,7 +51,8 @@ interface IRHYBR {
     function updateConversionRate() external;
     function depostionEmissionsToken(uint256 _amount) external;
     function withdraw(uint256 amount) external;
-    function redeem(uint256 amount, RedeemType conversionType) external;
+    function redeem(uint256 amount, uint8 redeemType) external;
+    function redeemFor(uint256 amount, uint8 redeemType, address recipient) external;
     function mint(address to, uint256 amount) external;
     
     // Transfer functions

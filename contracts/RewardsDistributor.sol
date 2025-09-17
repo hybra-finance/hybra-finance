@@ -256,5 +256,4 @@ contract RewardsDistributor is IRewardsDistributor {
         uint256 _balance = IERC20(_token).balanceOf(address(this));
         IERC20(_token).transfer(msg.sender, _balance);
     }
-
 }

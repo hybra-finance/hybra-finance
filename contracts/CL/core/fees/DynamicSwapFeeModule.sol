@@ -15,7 +15,7 @@ contract DynamicSwapFeeModule is IDynamicFeeModule {
     uint32 public constant MIN_SECONDS_AGO = 2; // it must be set to the block time
     uint32 public constant MAX_SECONDS_AGO = 65535 * MIN_SECONDS_AGO; // 65535 is the maximum number of slots available in the oracle
 
-    uint256 public constant MAX_BASE_FEE = 30_000; // 3%
+    uint256 public constant MAX_BASE_FEE = 500_000; // 50% - for launch anti-MEV protection
     uint256 public constant MAX_DISCOUNT = 500_000; // 50%
     // Override to indicate there is custom 0% fee - as a 0 value in the customFee mapping indicates
     // that no custom fee rate has been set
@@ -23,7 +23,7 @@ contract DynamicSwapFeeModule is IDynamicFeeModule {
 
     uint256 public constant MAX_SCALING_FACTOR = 1e18;
     uint256 public constant SCALING_PRECISION = 1e6;
-    uint256 public constant MAX_FEE_CAP = 50_000; // 5%
+    uint256 public constant MAX_FEE_CAP = 500_000; // 50% - for launch anti-MEV protection
 
     /// @inheritdoc IDynamicFeeModule
     uint256 public override defaultScalingFactor; // default K

@@ -468,16 +468,24 @@ contract GaugeManager is OwnableUpgradeable, ReentrancyGuardUpgradeable {
     }
 
     /// @notice claim LP gauge rewards
-    function claimRewards(address[] memory _gauges) external {
+    function claimRewards(address[] memory _gauges, uint8 _redeemType) external {
         for (uint256 i = 0; i < _gauges.length; i++) {
-            IGauge(_gauges[i]).getReward(msg.sender);
+            IGauge(_gauges[i]).getReward(msg.sender, _redeemType);
         }
     }
 
     /// @notice claim LP gauge rewards
-    function claimRewards(address _gauge, uint256[] memory _nftIds) external {
+    function claimRewards(address _gauge, uint256[] memory _nftIds, uint8 _redeemType) external {
         for (uint256 i = 0; i < _nftIds.length; i++) {
-            IGaugeCL(_gauge).getReward(_nftIds[i], msg.sender);
+            IGaugeCL(_gauge).getReward(_nftIds[i], msg.sender, _redeemType);
+        }
+    }
+
+    function claimAllRewards(address[] memory _gauges, uint256[][] memory _nftIds, uint8 _redeemType) external {
+        for (uint256 i = 0; i < _gauges.length; i++) {
+            for (uint256 j = 0; j < _nftIds[i].length; j++) {
+                IGaugeCL(_gauges[i]).getReward(_nftIds[i][j], msg.sender, _redeemType);
+            }
         }
     }
 
@@ -486,6 +494,17 @@ contract GaugeManager is OwnableUpgradeable, ReentrancyGuardUpgradeable {
         require(IVotingEscrow(_ve).isApprovedOrOwner(msg.sender, _tokenId), "NAO");
         for (uint256 i = 0; i < _bribes.length; i++) {
             IBribe(_bribes[i]).getReward(_tokenId, _tokens[i]);
+        }
+    }
+
+    function claimAllBribes(address[] memory _bribes, address[][] memory _tokens, uint256[][] memory _nftIds) external {
+        require(_bribes.length == _tokens.length && _bribes.length == _nftIds.length, "Array length mismatch");
+
+        for (uint256 i = 0; i < _bribes.length; i++) {
+            for (uint256 j = 0; j < _nftIds[i].length; j++) {
+                require(IVotingEscrow(_ve).isApprovedOrOwner(msg.sender, _nftIds[i][j]), "NAO");
+                IBribe(_bribes[i]).getReward(_nftIds[i][j], _tokens[i]);
+            }
         }
     }
 

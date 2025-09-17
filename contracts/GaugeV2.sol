@@ -294,19 +294,20 @@ contract GaugeV2 is ReentrancyGuard, Ownable {
   
 
     ///@notice withdraw all TOKEN and harvest rewardToken
-    function withdrawAllAndHarvest() external {
+    function withdrawAllAndHarvest(uint8 _redeemType) external {
         _withdraw(_balanceOf(msg.sender));
-        getReward();
+        getReward(_redeemType);
     }
 
  
     ///@notice User harvest function called from distribution (GaugeManager allows harvest on multiple gauges)
-    function getReward(address _user) public nonReentrant onlyDistribution updateReward(_user) {
+    function getReward(address _user, uint8 _redeemType) public nonReentrant onlyDistribution updateReward(_user) {
         uint256 reward = rewards[_user];
         if (reward > 0) {
             rewards[_user] = 0;
+            IERC20(rewardToken).safeApprove(rHYBR, reward);
             IRHYBR(rHYBR).depostionEmissionsToken(reward);
-            IERC20(rHYBR).safeTransfer(_user, reward);
+            IRHYBR(rHYBR).redeemFor(reward, _redeemType, _user);
             emit Harvest(_user, reward);
         }
 
@@ -316,12 +317,13 @@ contract GaugeV2 is ReentrancyGuard, Ownable {
     }
 
     ///@notice User harvest function
-    function getReward() public nonReentrant updateReward(msg.sender) {
+    function getReward(uint8 _redeemType) public nonReentrant updateReward(msg.sender) {
         uint256 reward = rewards[msg.sender];
         if (reward > 0) {
             rewards[msg.sender] = 0;
+            IERC20(rewardToken).safeApprove(rHYBR, reward);
             IRHYBR(rHYBR).depostionEmissionsToken(reward);
-            IERC20(rHYBR).safeTransfer(msg.sender, reward);
+            IRHYBR(rHYBR).redeemFor(reward, _redeemType, msg.sender);
             emit Harvest(msg.sender, reward);
         }
 

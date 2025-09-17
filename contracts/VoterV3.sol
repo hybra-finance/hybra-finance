@@ -245,7 +245,7 @@ contract VoterV3 is OwnableUpgradeable, ReentrancyGuardUpgradeable {
     --------------------------------------------------------------------------------
     ----------------------------------------------------------------------------- */
 
-        /// @notice view the total length of the pools
+    /// @notice view the total length of the pools
     function length() external view returns (uint256) {
         return gaugeManager.pools().length;
     }

@@ -62,5 +62,9 @@ interface IVotingEscrow {
     function unlockPermanent(uint _tokenId) external;
 
 
-    function increase_unlock_time_for(uint _tokenId, uint _lock_duration) external;
+    function increase_unlock_time(uint _tokenId, uint _lock_duration) external;
+
+    function multiSplit(uint _tokenId, uint[] memory _amounts) external returns (uint[] memory);
+
+    function safeTransferFrom(address _from, address _to, uint _tokenId) external;
 }

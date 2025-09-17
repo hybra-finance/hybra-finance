@@ -9,6 +9,7 @@ import "./interfaces/IVoter.sol";
 import "./interfaces/IBribe.sol";
 import "./interfaces/IRewardsDistributor.sol";
 import "./interfaces/IGaugeManager.sol";
+import "./interfaces/ISwapper.sol";
 import {HybraTimeLibrary} from "./libraries/HybraTimeLibrary.sol";
 
 /**
@@ -19,10 +20,18 @@ import {HybraTimeLibrary} from "./libraries/HybraTimeLibrary.sol";
 contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
     
     // Lock period for new deposits (configurable between 12-24 hours)
-    uint256 public transferLockPeriod = 12 hours;
-    uint256 public constant MIN_LOCK_PERIOD = 12 hours;
-    uint256 public constant MAX_LOCK_PERIOD = 24 hours;
-    
+    uint256 public transferLockPeriod = 24 hours;
+    uint256 public constant MIN_LOCK_PERIOD = 1 minutes;
+    uint256 public constant MAX_LOCK_PERIOD = 240 minutes;
+    uint256 public head_not_withdraw_time = 1200; // 5days
+    uint256 public tail_not_withdraw_time = 300; // 1day
+
+    // Withdraw fee configuration (basis points, 10000 = 100%)
+    uint256 public withdrawFee = 100; // 1% default fee
+    uint256 public constant MIN_WITHDRAW_FEE = 10; // 0.1% minimum
+    uint256 public constant MAX_WITHDRAW_FEE = 1000; // 10% maximum
+    uint256 public constant BASIS = 10000;
+    address public Team; // Address to receive fees
     // User deposit tracking for transfer locks
     struct UserLock {
         uint256 amount;
@@ -41,54 +50,35 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
     uint256 public veTokenId; // The veNFT owned by this contract
     
     // Auto-voting strategy
-    bool public autoVotingEnabled;
     address public operator; // Address that can manage voting strategy
     address[] public defaultPools; // Default pools to vote for
     uint256[] public defaultWeights; // Default weights for pools
     uint256 public lastVoteEpoch; // Last epoch when we voted
     
     // Reward tracking
-    uint256 public pendingPenaltyRewards; // Penalty rewards from rHYBR conversions
     uint256 public lastRebaseTime;
     uint256 public lastCompoundTime;
-    
-    // Swap configuration
-    mapping(address => bool) public whitelistedAggregators;
-    
+
+    // Swap module
+    ISwapper public swapper;
+
     // Errors
-    error AGGREGATOR_NOT_WHITELISTED(address aggregator);
-    error AGGREGATOR_REVERTED(bytes returnData);
-    error AMOUNT_OUT_TOO_LOW(uint256 actual);
-    error FORBIDDEN_TOKEN(address token);
     error NOT_AUTHORIZED();
     
     // Events
     event Deposit(address indexed user, uint256 hybrAmount, uint256 sharesReceived);
-    event Withdraw(address indexed user, uint256 shares, uint256 hybrAmount);
+    event Withdraw(address indexed user, uint256 shares, uint256 hybrAmount, uint256 fee);
     event Compound(uint256 rewards, uint256 newTotalLocked);
     event PenaltyRewardReceived(uint256 amount);
     event TransferLockPeriodUpdated(uint256 oldPeriod, uint256 newPeriod);
-    event AggregatorWhitelisted(address indexed aggregator, bool whitelisted);
-    event NativeDEXUpdated(address oldDEX, address newDEX);
-    event SwappedToHYBR(address indexed operator, address tokenIn, uint256 amountIn, uint256 hybrOut);
+    event SwapperUpdated(address indexed oldSwapper, address indexed newSwapper);
     event VoterSet(address voter);
     event EmergencyUnlock(address indexed user);
     event AutoVotingEnabled(bool enabled);
     event OperatorUpdated(address indexed oldOperator, address indexed newOperator);
     event DefaultVotingStrategyUpdated(address[] pools, uint256[] weights);
     event AutoVoteExecuted(uint256 epoch, address[] pools, uint256[] weights);
-       /**
-     * @notice Swap parameters for aggregator calls
-     */
-    struct SwapParams {
-        address aggregator;     // Aggregator contract address
-        address tokenIn;        // Input token address
-        uint256 amountIn;       // Input token amount
-        uint256 minAmountOut;   // Minimum HYBR expected
-        bytes callData;         // Aggregator call data
-    }
-    
-  
+
     constructor(
         address _HYBR,
         address _votingEscrow
@@ -101,7 +91,6 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
         lastRebaseTime = block.timestamp;
         lastCompoundTime = block.timestamp;
         operator = msg.sender; // Initially set deployer as operator
-        autoVotingEnabled = true; // Enable auto-voting by default
     }
     
     
@@ -144,14 +133,13 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
             // Add to existing veNFT
             IERC20(HYBR).approve(votingEscrow, amount);
             IVotingEscrow(votingEscrow).deposit_for(veTokenId, amount);
-            
+
             // Extend lock to maximum duration
-            uint256 maxLockTime = block.timestamp + HybraTimeLibrary.MAX_LOCK_DURATION;
-            IVotingEscrow(votingEscrow).increase_unlock_time_for(veTokenId, maxLockTime);
+            _extendLockToMax();
         }
         
         // Calculate shares to mint based on current totalAssets
-        uint256 shares = _calculateShares(amount);
+        uint256 shares = calculateShares(amount);
         
         // Mint gHYBR shares
         _mint(recipient, shares);
@@ -160,6 +148,66 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
         _addTransferLock(recipient, shares);
         
         emit Deposit(msg.sender, amount, shares);
+    }
+
+    /**
+     * @notice Withdraw gHYBR shares and receive a new veNFT with proportional HYBR
+     * @dev Creates new veNFT using multiSplit to maintain proportional ownership
+     * @param shares Amount of gHYBR shares to burn
+     * @return userTokenId The ID of the new veNFT created for the user
+     */
+    function withdraw(uint256 shares) external nonReentrant returns (uint256 userTokenId) {
+        require(shares > 0, "Zero shares");
+        require(balanceOf(msg.sender) >= shares, "Insufficient balance");
+        require(veTokenId != 0, "No veNFT initialized");
+        require(IVotingEscrow(votingEscrow).voted(veTokenId) == false, "Cannot withdraw yet");
+        
+        uint256 epochStart = HybraTimeLibrary.epochStart(block.timestamp);
+        uint256 epochNext = HybraTimeLibrary.epochNext(block.timestamp);
+
+        require(block.timestamp >= epochStart + head_not_withdraw_time && block.timestamp < epochNext - tail_not_withdraw_time, "Cannot withdraw yet");
+
+        // Calculate proportional HYBR amount from veNFT
+        uint256 hybrAmount = calculateAssets(shares);
+        require(hybrAmount > 0, "No assets to withdraw");
+
+        // Calculate fee amount (from the HYBR amount, not shares)
+        uint256 feeAmount = 0;
+        if (withdrawFee > 0) {
+            feeAmount = (hybrAmount * withdrawFee) / BASIS;
+        }
+
+        // User receives amount minus fee
+        uint256 userAmount = hybrAmount - feeAmount;
+        require(userAmount > 0, "Amount too small after fee");
+
+        // Get actual HYBR locked amount (not voting power)
+        uint256 veBalance = totalAssets();
+        require(hybrAmount <= veBalance, "Insufficient veNFT balance");
+
+        uint256 remainingAmount = veBalance - userAmount - feeAmount;  
+        require(remainingAmount >= 0, "Cannot withdraw entire veNFT");
+
+        // Burn gHYBR shares (full amount)
+        _burn(msg.sender, shares);
+
+        // Use multiSplit to create two NFTs: one for user, one for contract
+        uint256[] memory amounts = new uint256[](3);
+        amounts[0] = remainingAmount; // Amount staying with gHYBR 
+        amounts[1] = userAmount;      // Amount going to user (after fee)
+        amounts[2] = feeAmount;      // Amount going to fee recipient
+
+
+        uint256[] memory newTokenIds = IVotingEscrow(votingEscrow).multiSplit(veTokenId, amounts);
+    
+        // Update contract's veTokenId to the first new token
+        veTokenId = newTokenIds[0];
+        userTokenId = newTokenIds[1];
+        uint256 feeTokenId = newTokenIds[2];
+        // Note: userTokenId is transferred to user, they can manage their own lock time
+        IVotingEscrow(votingEscrow).safeTransferFrom(address(this), msg.sender, userTokenId);
+        IVotingEscrow(votingEscrow).safeTransferFrom(address(this), Team, feeTokenId);
+        emit Withdraw(msg.sender, shares, userAmount, feeAmount);
     }
 
 
@@ -179,7 +227,7 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
     /**
      * @notice Calculate shares to mint based on deposit amount
      */
-    function _calculateShares(uint256 amount) internal view returns (uint256) {
+    function calculateShares(uint256 amount) public view returns (uint256) {
         uint256 _totalSupply = totalSupply();
         uint256 _totalAssets = totalAssets();
         if (_totalSupply == 0 || _totalAssets == 0) {
@@ -202,12 +250,15 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
     
     /**
      * @notice Get total assets (HYBR) locked in veNFT
+     * @dev Returns actual HYBR amount, not voting power
      */
     function totalAssets() public view returns (uint256) {
         if (veTokenId == 0) {
             return 0;
         }
-        return  IVotingEscrow(votingEscrow).balanceOfNFT(veTokenId);
+        // Get actual locked HYBR amount, not voting power
+        IVotingEscrow.LockedBalance memory locked = IVotingEscrow(votingEscrow).locked(veTokenId);
+        return uint256(int256(locked.amount));
     }
     
     /**
@@ -362,53 +413,28 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
     }
     
  
-    
+
     /**
-     * @notice Swap tokens to HYBR via aggregator with slippage protection
-     * @param _params Swap parameters including aggregator and calldata
+     * @notice Execute swap through the configured swapper module
+     * @param _params Swap parameters for the swapper module
      */
-    function swapToHYBR(SwapParams calldata _params) external nonReentrant onlyOperator {
-        // Validate aggregator is whitelisted
-        if (!whitelistedAggregators[_params.aggregator]) {
-            revert AGGREGATOR_NOT_WHITELISTED(_params.aggregator);
-        }
-        
-        // Prevent swapping HYBR itself
-        if (_params.tokenIn == HYBR) {
-            revert FORBIDDEN_TOKEN(HYBR);
-        }
-        
-        // Record balances before swap
-        uint256 totalAssetsBeforeSwap = totalAssets();
-        uint256 hybrBalanceBeforeSwap = IERC20(HYBR).balanceOf(address(this));
-        
-        // Approve aggregator to spend input token
-        IERC20(_params.tokenIn).approve(_params.aggregator, _params.amountIn);
-        
-        // Execute swap via aggregator
-        (bool success, bytes memory returnData) = _params.aggregator.call(_params.callData);
-        if (!success) {
-            revert AGGREGATOR_REVERTED(returnData);
-        }
-        
-        // Validate results after swap
-        uint256 totalAssetsAfterSwap = totalAssets();
-        uint256 hybrBalanceAfterSwap = IERC20(HYBR).balanceOf(address(this));
-        
-        // Calculate HYBR received
-        uint256 hybrReceived = hybrBalanceAfterSwap - hybrBalanceBeforeSwap;
-        
-        // Check slippage protection
-        if (hybrReceived < _params.minAmountOut) {
-            revert AMOUNT_OUT_TOO_LOW(hybrReceived);
-        }
-        
-        // Ensure veNFT balance wasn't manipulated
-        if (totalAssetsAfterSwap != totalAssetsBeforeSwap) {
-            revert FORBIDDEN_TOKEN(HYBR);
-        }
-        
-        emit SwappedToHYBR(msg.sender, _params.tokenIn, _params.amountIn, hybrReceived);
+    function executeSwap(ISwapper.SwapParams calldata _params) external nonReentrant onlyOperator {
+        require(address(swapper) != address(0), "Swapper not set");
+
+        // Get token balance before swap
+        uint256 tokenBalance = IERC20(_params.tokenIn).balanceOf(address(this));
+        require(tokenBalance >= _params.amountIn, "Insufficient token balance");
+
+        // Approve swapper to spend tokens
+        IERC20(_params.tokenIn).approve(address(swapper), _params.amountIn);
+
+        // Execute swap through swapper module
+        uint256 hybrReceived = swapper.swapToHYBR(_params);
+
+        // Reset approval for safety
+        IERC20(_params.tokenIn).approve(address(swapper), 0);
+
+        // HYBR is now in this contract, ready for compounding
     }
     
     /**
@@ -423,11 +449,10 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
             // Lock all HYBR to existing veNFT
             IERC20(HYBR).approve(votingEscrow, hybrBalance);
             IVotingEscrow(votingEscrow).deposit_for(veTokenId, hybrBalance);
-            
+
             // Extend lock to maximum duration
-            uint256 maxLockTime = block.timestamp + HybraTimeLibrary.MAX_LOCK_DURATION;
-            IVotingEscrow(votingEscrow).increase_unlock_time_for(veTokenId, maxLockTime);
-            
+            _extendLockToMax();
+
             lastCompoundTime = block.timestamp;
 
             emit Compound(hybrBalance, totalAssets());
@@ -446,10 +471,6 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
         IVoter(voter).vote(veTokenId, _poolVote, _weights);
         lastVoteEpoch = HybraTimeLibrary.epochStart(block.timestamp);
         
-        // Update auto-voting settings if this was a manual vote and auto-voting is enabled
-        if (autoVotingEnabled && msg.sender == operator) {
-            _updateDefaultStrategy(_poolVote, _weights);
-        }
     }
     
     /**
@@ -460,44 +481,30 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
         require(voter != address(0), "Voter not set");
         
         IVoter(voter).reset(veTokenId);
-        
-        // Disable auto-voting when resetting
-        if (autoVotingEnabled) {
-            IVoter(voter).disableAutoVote(veTokenId);
-            autoVotingEnabled = false;
-            emit AutoVotingEnabled(false);
-        }
     }
     
     /**
      * @notice Receive penalty rewards from rHYBR conversions
      */
-    function getPenaltyReward(uint256 amount) external {
-        pendingPenaltyRewards += amount;
+    function receivePenaltyReward(uint256 amount) external {
         
         // Auto-compound penalty rewards to existing veNFT
         if (amount > 0) {
             IERC20(HYBR).approve(votingEscrow, amount);
-            IVotingEscrow(votingEscrow).deposit_for(veTokenId, amount);
-            
-            // Extend lock to maximum duration
-            uint256 maxLockTime = block.timestamp + HybraTimeLibrary.MAX_LOCK_DURATION;
-            IVotingEscrow(votingEscrow).increase_unlock_time_for(veTokenId, maxLockTime);
-            
-            pendingPenaltyRewards = 0;
+
+            if(veTokenId == 0){
+                _initializeVeNFT(amount);
+            } else{
+                IVotingEscrow(votingEscrow).deposit_for(veTokenId, amount);
+
+                // Extend lock to maximum duration
+                _extendLockToMax();
+            }
         }
         
         emit PenaltyRewardReceived(amount);
     }
-    
-    /**
-     * @notice Extend veNFT lock to max duration
-     */
-    function extendLock() external {
-        uint256 maxTime = HybraTimeLibrary.MAX_LOCK_DURATION;
-        IVotingEscrow(votingEscrow).increase_unlock_time_for(veTokenId, maxTime);
-    }
-    
+       
     /**
      * @notice Set the voter contract
      */
@@ -516,18 +523,43 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
         transferLockPeriod = _period;
         emit TransferLockPeriodUpdated(oldPeriod, _period);
     }
-    
+
     /**
-     * @notice Whitelist/unwhitelist aggregator for swaps
-     * @param _aggregator Aggregator contract address
-     * @param _whitelisted Whether to whitelist or not
+     * @notice Set withdraw fee (in basis points)
+     * @param _fee Fee amount (10-30 basis points)
      */
-    function setAggregatorWhitelist(address _aggregator, bool _whitelisted) external onlyOwner {
-        whitelistedAggregators[_aggregator] = _whitelisted;
-        emit AggregatorWhitelisted(_aggregator, _whitelisted);
+    function setWithdrawFee(uint256 _fee) external onlyOwner {
+        require(_fee >= MIN_WITHDRAW_FEE && _fee <= MAX_WITHDRAW_FEE, "Invalid fee");
+        withdrawFee = _fee;
+    }
+
+
+    function setHeadNotWithdrawTime(uint256 _time) external onlyOwner {
+        head_not_withdraw_time = _time;
+    }
+
+    function setTailNotWithdrawTime(uint256 _time) external onlyOwner {
+        tail_not_withdraw_time = _time;
     }
     
-
+    /**
+     * @notice Set the swapper module
+     * @param _swapper Address of the swapper module
+     */
+    function setSwapper(address _swapper) external onlyOwner {
+        require(_swapper != address(0), "Invalid swapper");
+        address oldSwapper = address(swapper);
+        swapper = ISwapper(_swapper);
+        emit SwapperUpdated(oldSwapper, _swapper);
+    }
+    
+    /**
+     * @notice Set the team address
+     */
+    function setTeam(address _team) external onlyOwner {
+        require(_team != address(0), "Invalid team");
+        Team = _team;
+    }
     
     /**
      * @notice Emergency unlock for a user (owner only)
@@ -537,11 +569,7 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
         lockedBalance[user] = 0;
         emit EmergencyUnlock(user);
     }
-    
 
-    
-  
-    
     /**
      * @notice Get user's locks info
      */
@@ -577,16 +605,7 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
     
 
 
-    /**
-     * @notice Get the current exchange rate (HYBR per gHYBR)
-     */
-    function exchangeRate() external view returns (uint256) {
-        uint256 _totalSupply = totalSupply();
-        if (_totalSupply == 0) {
-            return 1e18;
-        }
-        return (totalAssets() * 1e18) / _totalSupply;
-    }
+
     
     /**
      * @notice Get veNFT lock end time
@@ -598,23 +617,28 @@ contract GovernanceHYBR is ERC20, Ownable, ReentrancyGuard {
         IVotingEscrow.LockedBalance memory locked = IVotingEscrow(votingEscrow).locked(veTokenId);
         return uint256(locked.end);
     }
-    
 
-    
     /**
-     * @notice Check if gHYBR should vote this epoch
+     * @notice Internal helper to safely extend lock to maximum duration
+     * @dev Calculates exact duration needed to reach max allowed unlock time
      */
-    function shouldVoteThisEpoch() external view returns (bool) {
-        if (!autoVotingEnabled || voter == address(0) || veTokenId == 0 || defaultPools.length == 0) {
-            return false;
+    function _extendLockToMax() internal {
+        if (veTokenId == 0) return;
+
+        IVotingEscrow.LockedBalance memory locked = IVotingEscrow(votingEscrow).locked(veTokenId);
+        if (locked.isPermanent || locked.end <= block.timestamp) return;
+
+        uint256 maxUnlockTime = ((block.timestamp + HybraTimeLibrary.MAX_LOCK_DURATION) / HybraTimeLibrary.WEEK) * HybraTimeLibrary.WEEK;
+
+        // Only extend if difference is more than 2 hours
+        if (maxUnlockTime > locked.end + 2 hours) {
+            try IVotingEscrow(votingEscrow).increase_unlock_time(veTokenId, HybraTimeLibrary.MAX_LOCK_DURATION) {
+                // Extension successful
+            } catch {
+                // Extension failed, continue without error
+                // This can happen if already at max possible time or other constraints
+            }
         }
-        
-        uint256 currentEpoch = HybraTimeLibrary.epochStart(block.timestamp);
-        if (lastVoteEpoch >= currentEpoch) {
-            return false; // Already voted
-        }
-        
-        // Check if we're in voting window
-        return block.timestamp > HybraTimeLibrary.epochVoteStart(block.timestamp);
     }
+
 }

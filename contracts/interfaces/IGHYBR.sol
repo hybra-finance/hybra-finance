@@ -18,7 +18,7 @@ interface IGHYBR {
     // Core functions
     function deposit(uint256 amount, address recipient) external;
     function withdraw(uint256 amount) external;
-    function getPenaltyReward(uint256 amount) external;
+    function receivePenaltyReward(uint256 amount) external;
     
     // Transfer functions
     function transfer(address to, uint256 amount) external returns (bool);

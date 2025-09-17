@@ -17,6 +17,8 @@ import '../interfaces/IRHYBR.sol';
 import {HybraTimeLibrary} from "../libraries/HybraTimeLibrary.sol";
 import {FullMath} from "./libraries/FullMath.sol";
 import {FixedPoint128} from "./libraries/FixedPoint128.sol";
+import '../interfaces/IRHYBR.sol';
+
 
 
 contract GaugeCL is ReentrancyGuard, Ownable, IERC721Receiver {
@@ -183,7 +185,7 @@ contract GaugeCL is ReentrancyGuard, Ownable, IERC721Receiver {
         emit Deposit(msg.sender, tokenId);
     }
 
-    function withdraw(uint256 tokenId) external nonReentrant isNotEmergency {
+    function withdraw(uint256 tokenId, uint8 redeemType) external nonReentrant isNotEmergency {
            require(_stakes[msg.sender].contains(tokenId), "NA");
 
         // trigger update on staked position so NFT will be in sync with the pool
@@ -197,7 +199,7 @@ contract GaugeCL is ReentrancyGuard, Ownable, IERC721Receiver {
         );
 
         (,,,,, int24 tickLower, int24 tickUpper, uint128 liquidityToStake,,,,) = nonfungiblePositionManager.positions(tokenId);
-        _getReward(tickLower, tickUpper, tokenId, msg.sender);
+        _getReward(tickLower, tickUpper, tokenId, msg.sender, redeemType);
 
         // update virtual liquidity in pool only if token has existing liquidity
         // i.e. not all removed already via decreaseStakedLiquidity
@@ -213,25 +215,25 @@ contract GaugeCL is ReentrancyGuard, Ownable, IERC721Receiver {
 
     
 
-    function getReward(uint256 tokenId, address account) public nonReentrant onlyDistribution {
+    function getReward(uint256 tokenId, address account,uint8 redeemType ) public nonReentrant onlyDistribution {
 
         require(_stakes[account].contains(tokenId), "NA");
 
         (,,,,, int24 tickLower, int24 tickUpper,,,,,) = nonfungiblePositionManager.positions(tokenId);
-        _getReward(tickLower, tickUpper, tokenId, account);
+        _getReward(tickLower, tickUpper, tokenId, account, redeemType);
     }
 
 
-    function _getReward(int24 tickLower, int24 tickUpper, uint256 tokenId, address account) internal {
+    function _getReward(int24 tickLower, int24 tickUpper, uint256 tokenId,address account, uint8 redeemType) internal {
         _updateRewards(tokenId, tickLower, tickUpper);
         uint256 rewardAmount = rewards[tokenId];
         if(rewardAmount > 0){
             delete rewards[tokenId];
-            rewardToken.approve(rHYBR, rewardAmount);
+            rewardToken.safeApprove(rHYBR, rewardAmount);
             IRHYBR(rHYBR).depostionEmissionsToken(rewardAmount);
-            IERC20(rHYBR).safeTransfer(account, rewardAmount);
+            IRHYBR(rHYBR).redeemFor(rewardAmount, redeemType, account);
         }
-        emit Harvest(account, rewardAmount);
+        emit Harvest(msg.sender, rewardAmount);
     }
 
     function notifyRewardAmount(address token, uint256 rewardAmount) external nonReentrant
@@ -290,6 +292,8 @@ contract GaugeCL is ReentrancyGuard, Ownable, IERC721Receiver {
         (token0, token1) = clPool.gaugeFees();
 
     }
+
+  
 
 
 
